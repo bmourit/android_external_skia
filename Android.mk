@@ -268,7 +268,7 @@ LOCAL_SRC_FILES:= \
 	src/images/SkImages.cpp \
 	src/images/SkImageDecoder.cpp \
 	src/images/SkImageDecoder_Factory.cpp \
-	src/images/SkImageDecoder_Act_libbmp.cpp \
+	src/images/SkImageDecoder_libbmp.cpp \
 	src/images/SkImageDecoder_libgif.cpp \
 	src/images/SkImageDecoder_libico.cpp \
 	src/images/SkImageDecoder_libjpeg.cpp \
@@ -468,10 +468,6 @@ LOCAL_SHARED_LIBRARIES := \
 	libutils \
 	libz \
 	libexpat \
-	libalc \
-	libOMX.Action.Image.Decoder \
-	libOMX_Core \
-	libimg_en \
 	libutils \
 	libEGL \
 	libGLESv2
@@ -480,7 +476,6 @@ LOCAL_STATIC_LIBRARIES := \
 	libft2 \
 	libpng \
 	libgif \
-	libbmp \
 	libwebp-decode \
 	libwebp-encode
 
@@ -499,7 +494,6 @@ LOCAL_C_INCLUDES := \
 	$(LOCAL_PATH)/src/gpu \
 	$(LOCAL_PATH)/src/image \
 	$(LOCAL_PATH)/src/utils \
-	$(LOCAL_PATH)/include/images/omx \
 	external/freetype/include \
 	external/zlib \
 	external/libpng \
@@ -508,10 +502,7 @@ LOCAL_C_INCLUDES := \
 	external/webp/include \
 	frameworks/base/opengl/include \
 	frameworks/opt/emoji \
-	external/expat/lib \
-	$(TOP)/frameworks/av/include/alsp/inc \
-	$(TOP)/frameworks/av/include/alsp/inc/common \
-	$(TOP)/frameworks/native/include/media/openmax 
+	external/expat/lib
 
 LOCAL_EXPORT_C_INCLUDES := \
 	$(LOCAL_PATH)/include/core \
