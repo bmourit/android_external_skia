@@ -13,6 +13,7 @@
 #include "SkStream.h"
 #include "SkTemplates.h"
 #include "SkPackBits.h"
+#include "SkScaledBitmapSampler.h"
 
 #include "gif_lib.h"
 
@@ -154,6 +155,13 @@ static bool error_return(GifFileType* gif, const SkBitmap& bm,
     return false;
 }
 
+static void skip_src_rows(GifFileType* gif, uint8_t storage[], int width, int count) {
+    for (int i = 0; i < count; i++) {
+        uint8_t* tmp = storage;
+        DGifGetLine(gif, tmp, width);
+    }
+}
+
 bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
 #if GIFLIB_MAJOR < 5
     GifFileType* gif = DGifOpen(sk_stream, DecodeCallBackProc);
@@ -178,7 +186,7 @@ bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
     int extFunction;
 #endif
     int transpIndex = -1;   // -1 means we don't have it (yet)
-
+    int sampleSize = this->getSampleSize();
     do {
         if (DGifGetRecordType(gif, &recType) == GIF_ERROR) {
             return error_return(gif, *bm, "DGifGetRecordType");
@@ -207,6 +215,13 @@ bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
                 return true;
             }
 
+            if (gif->Image.Interlace) {
+                sampleSize = 1;
+            }
+
+            SkScaledBitmapSampler sampler(width, height, sampleSize);
+
+            bm->setConfig(SkBitmap::kIndex8_Config, sampler.scaledWidth(), sampler.scaledHeight());
             SavedImage* image = &gif->SavedImages[gif->ImageCount-1];
             const GifImageDesc& desc = image->ImageDesc;
 
@@ -248,7 +263,11 @@ bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
             }
 
             SkAutoLockPixels alp(*bm);
-
+            SkScaledBitmapSampler::SrcConfig sc;
+            sc = SkScaledBitmapSampler::kIndex;
+            if (!sampler.begin(bm, sc, *this)) {
+                return false;
+            }
             // time to decode the scanlines
             //
             uint8_t*  scanline = bm->getAddr8(0, 0);
@@ -278,7 +297,7 @@ bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
                 }
                 memset(scanline, fill, bm->getSize());
                 // bump our starting address
-                scanline += desc.Top * rowBytes + desc.Left;
+                scanline += ((desc.Top/sampleSize) * rowBytes + (desc.Left/sampleSize));
             }
 
             // now decode each scanline
@@ -296,12 +315,19 @@ bool SkGIFImageDecoder::onDecode(SkStream* sk_stream, SkBitmap* bm, Mode mode) {
             }
             else
             {
+                int out_width = (innerWidth/sampleSize);
+                int out_height = (innerHeight/sampleSize); 
+                SkAutoMalloc storage(innerWidth);
+                uint8_t* srcRow = (uint8_t*)storage.get();
                 // easy, non-interlace case
-                for (int y = 0; y < innerHeight; y++) {
-                    if (DGifGetLine(gif, scanline, innerWidth) == GIF_ERROR) {
+                for (int y = 0; y < out_height; y++) {
+                    if (DGifGetLine(gif, srcRow, innerWidth) == GIF_ERROR) {
                         return error_return(gif, *bm, "DGifGetLine");
                     }
-                    scanline += rowBytes;
+                    sampler.next(srcRow);
+                    if (y < out_height - 1) {
+                        skip_src_rows(gif, srcRow, innerWidth, sampler.srcDY() - 1);
+                    }
                 }
             }
             goto DONE;

@@ -285,7 +285,8 @@ LOCAL_SRC_FILES:= \
 	src/images/SkImages.cpp \
 	src/images/SkForceLinking.cpp \
 	src/images/SkImageDecoder.cpp \
-	src/images/SkImageDecoder_libbmp.cpp \
+	#src/images/SkImageDecoder_libbmp.cpp \
+	src/images/SkImageDecoder_Act_libbmp.cpp \
 	src/images/SkImageDecoder_wbmp.cpp \
 	src/images/SkImageDecoder_libico.cpp \
 	src/images/SkImageDecoder_libwebp.cpp \
@@ -548,7 +549,11 @@ LOCAL_SHARED_LIBRARIES := \
 	libexpat \
 	libutils \
 	libEGL \
-	libGLESv2
+	libGLESv2 \
+	libalc \
+	libOMX.Action.Image.Decoder \
+	libOMX_Core \
+	libimg_en
 
 LOCAL_STATIC_LIBRARIES := \
 	libgif \
@@ -568,6 +573,7 @@ LOCAL_C_INCLUDES := \
 	$(LOCAL_PATH)/include/ports \
 	$(LOCAL_PATH)/include/utils \
 	$(LOCAL_PATH)/include/xml \
+	$(LOCAL_PATH)/include/images/omx \
 	$(LOCAL_PATH)/src/core \
 	$(LOCAL_PATH)/src/gpu \
 	$(LOCAL_PATH)/src/image \
@@ -582,7 +588,10 @@ LOCAL_C_INCLUDES := \
 	external/jpeg \
 	external/webp/include \
 	frameworks/base/opengl/include \
-	external/expat/lib
+	external/expat/lib \
+	$(TOP)/frameworks/av/include/alsp/inc \
+	$(TOP)/frameworks/av/include/alsp/inc/common \
+	$(TOP)/frameworks/native/include/media/openmax
 
 LOCAL_EXPORT_C_INCLUDE_DIRS := \
 	$(LOCAL_PATH)/include/config \

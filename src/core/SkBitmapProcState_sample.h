@@ -7,6 +7,7 @@
  */
 #include "SkUtils.h"
 
+#include <cutils/log.h>
 #if DSTSIZE==32
     #define DSTTYPE SkPMColor
 #elif DSTSIZE==16
@@ -41,6 +42,14 @@ void MAKENAME(_filter_DXDY)(const SkBitmapProcState& s,
 void MAKENAME(_nofilter_DXDY)(const SkBitmapProcState& s,
                               const uint32_t* SK_RESTRICT xy,
                               int count, DSTTYPE* SK_RESTRICT colors) {
+     if (!s.fBitmap) {
+        ALOGD("fatal nofilter fBitmap null %d", __LINE__);
+        return ;
+    }
+     if (!(s.fBitmap->getPixels())) {
+        ALOGD("fatal nofilter fBitmap srcAddr null %d ", __LINE__);
+        return;
+    }
     SkASSERT(count > 0 && colors != NULL);
     SkASSERT(SkPaint::kNone_FilterLevel == s.fFilterLevel);
     SkDEBUGCODE(CHECKSTATE(s);)
@@ -50,6 +59,10 @@ void MAKENAME(_nofilter_DXDY)(const SkBitmapProcState& s,
 #endif
     const char* SK_RESTRICT srcAddr = (const char*)s.fBitmap->getPixels();
     size_t rb = s.fBitmap->rowBytes();
+     if(!srcAddr){
+        ALOGD("fatal nofilter fBitmap srcAddr null");
+        return;
+    }
 
     uint32_t XY;
     SRCTYPE src;
@@ -83,6 +96,16 @@ void MAKENAME(_nofilter_DXDY)(const SkBitmapProcState& s,
 void MAKENAME(_nofilter_DX)(const SkBitmapProcState& s,
                             const uint32_t* SK_RESTRICT xy,
                             int count, DSTTYPE* SK_RESTRICT colors) {
+     if(!s.fBitmap){
+        ALOGD("fatal nofilter fBitmap null %d", __LINE__);
+        return ;
+    }
+    
+     if(!(s.fBitmap->getPixels())){
+        ALOGD("fatal nofilter fBitmap srcAddr null %d ", __LINE__);
+        return;
+    }
+
     SkASSERT(count > 0 && colors != NULL);
     SkASSERT(s.fInvType <= (SkMatrix::kTranslate_Mask | SkMatrix::kScale_Mask));
     SkASSERT(SkPaint::kNone_FilterLevel == s.fFilterLevel);
@@ -92,7 +115,10 @@ void MAKENAME(_nofilter_DX)(const SkBitmapProcState& s,
     PREAMBLE(s);
 #endif
     const SRCTYPE* SK_RESTRICT srcAddr = (const SRCTYPE*)s.fBitmap->getPixels();
-
+    if(!srcAddr){
+        ALOGD("fatal nofilter fBitmap srcAddr null");
+        return;
+    }
     // buffer is y32, x16, x16, x16, x16, x16
     // bump srcAddr to the proper row, since we're told Y never changes
     SkASSERT((unsigned)xy[0] < (unsigned)s.fBitmap->height());
@@ -138,6 +164,16 @@ void MAKENAME(_nofilter_DX)(const SkBitmapProcState& s,
 void MAKENAME(_filter_DX)(const SkBitmapProcState& s,
                           const uint32_t* SK_RESTRICT xy,
                            int count, DSTTYPE* SK_RESTRICT colors) {
+     if (!s.fBitmap) {
+        ALOGD("fatal nofilter fBitmap null %d", __LINE__);
+        return ;
+    }
+
+     if (!(s.fBitmap->getPixels())) {
+        ALOGD("fatal nofilter fBitmap srcAddr null %d ", __LINE__);
+        return;
+    }
+
     SkASSERT(count > 0 && colors != NULL);
     SkASSERT(s.fFilterLevel != SkPaint::kNone_FilterLevel);
     SkDEBUGCODE(CHECKSTATE(s);)
@@ -147,6 +183,10 @@ void MAKENAME(_filter_DX)(const SkBitmapProcState& s,
 #endif
     const char* SK_RESTRICT srcAddr = (const char*)s.fBitmap->getPixels();
     size_t rb = s.fBitmap->rowBytes();
+     if(!srcAddr){
+        ALOGD("fatal nofilter fBitmap srcAddr null");
+        return;
+    }
     unsigned subY;
     const SRCTYPE* SK_RESTRICT row0;
     const SRCTYPE* SK_RESTRICT row1;
@@ -184,6 +224,16 @@ void MAKENAME(_filter_DX)(const SkBitmapProcState& s,
 void MAKENAME(_filter_DXDY)(const SkBitmapProcState& s,
                             const uint32_t* SK_RESTRICT xy,
                             int count, DSTTYPE* SK_RESTRICT colors) {
+     if (!s.fBitmap) {
+        ALOGD("fatal nofilter fBitmap null %d", __LINE__);
+        return ;
+    }
+    
+     if (!(s.fBitmap->getPixels())) {
+        ALOGD("fatal nofilter fBitmap srcAddr null %d ", __LINE__);
+        return;
+    }
+
     SkASSERT(count > 0 && colors != NULL);
     SkASSERT(s.fFilterLevel != SkPaint::kNone_FilterLevel);
     SkDEBUGCODE(CHECKSTATE(s);)
@@ -193,7 +243,10 @@ void MAKENAME(_filter_DXDY)(const SkBitmapProcState& s,
 #endif
     const char* SK_RESTRICT srcAddr = (const char*)s.fBitmap->getPixels();
     size_t rb = s.fBitmap->rowBytes();
-
+     if(!srcAddr){
+        ALOGD("fatal nofilter fBitmap srcAddr null");
+        return;
+    }
     do {
         uint32_t data = *xy++;
         unsigned y0 = data >> 14;

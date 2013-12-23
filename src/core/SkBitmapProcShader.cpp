@@ -10,6 +10,7 @@
 #include "SkFlattenableBuffers.h"
 #include "SkPixelRef.h"
 #include "SkErrorInternals.h"
+#include <cutils/log.h>
 
 bool SkBitmapProcShader::CanDo(const SkBitmap& bm, TileMode tx, TileMode ty) {
     switch (bm.config()) {
@@ -169,6 +170,29 @@ void SkBitmapProcShader::shadeSpan(int x, int y, SkPMColor dstC[], int count) {
     SkBitmapProcState::MatrixProc   mproc = state.getMatrixProc();
     SkBitmapProcState::SampleProc32 sproc = state.getSampleProc32();
     int max = fState.maxCountForBufferSize(sizeof(buffer[0]) * BUF_MAX);
+
+    if(!mproc||!sproc){
+	ALOGD("fatal mproc=%#x sproc=%#x\n", (unsigned int)mproc, (unsigned int)sproc);
+	return ;
+	}
+    if(!state.fBitmap){
+		ALOGD("fatal fBitmap is null: shadeSpan");
+		return ;
+	}
+     if(!(state.fBitmap->getPixels())){
+		ALOGD("fatal fBitmap getPixels null: shadeSpan");
+		return ;
+	 }
+	if(!state.fBitmap){
+		ALOGD("getPixel=%#x", (unsigned int)state.fBitmap->getPixels());
+		return ;
+  	}
+
+  if(!(state.fBitmap->pixelRef() == NULL ||
+             state.fBitmap->pixelRef()->isLocked())){
+	ALOGD("fatal pix ref is null ");
+	return ;	
+  }
 
     SkASSERT(state.fBitmap->getPixels());
     SkASSERT(state.fBitmap->pixelRef() == NULL ||

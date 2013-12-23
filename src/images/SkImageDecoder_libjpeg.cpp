@@ -23,8 +23,22 @@
 extern "C" {
     #include "jpeglib.h"
     #include "jerror.h"
-}
+    #include "OMX_Core.h"
+    #include "omx_base_component.h"
+    #include "omxjpegdecclient.h"
+    #include "tsemaphore.h"
+    #include "omx_jpegdec_component.h"
+    #include "mmm_plugin_img.h"
+    #include "OMX_ActJpegDecoder.h"
+} 
 
+#include <cutils/properties.h>
+
+#ifdef RESAMPLE
+#undef RESAMPLE
+#endif
+
+#define RESAMPLE
 // These enable timing code that report milliseconds for an encoding/decoding
 //#define TIME_ENCODE
 //#define TIME_DECODE
@@ -75,6 +89,12 @@ public:
         }
 
     ~SkJPEGImageIndex() {
+        if (reserve_bitmap) {
+            actal_free_wt(reserve_bitmap);
+	}
+	if (build_huffman) {
+	    jpeg_destroy_huffman_index(&fHuffmanIndex);
+	}
         if (fHuffmanCreated) {
             // Set to false before calling the libjpeg function, in case
             // the libjpeg function calls longjmp. Our setjmp handler may
@@ -93,6 +113,8 @@ public:
         if (fInfoInitialized) {
             this->destroyInfo();
         }
+
+	SkDELETE(bitmap);
     }
 
     /**
@@ -169,6 +191,11 @@ private:
     jpeg_decompress_struct fCInfo;
     huffman_index fHuffmanIndex;
     bool fInfoInitialized;
+    SkBitmap *bitmap;
+    SkBitmap::Config config; 
+    unsigned char *reserve_bitmap;
+    int sample_num;
+    bool build_huffman;
     bool fHuffmanCreated;
     bool fDecompressStarted;
     SkDEBUGCODE(bool fReadHeaderSucceeded;)

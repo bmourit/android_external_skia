@@ -25,7 +25,14 @@ SkImageDecoder* image_decoder_from_stream(SkStream*);
 SkImageDecoder* image_decoder_from_stream(SkStream* stream) {
     SkImageDecoder* codec = NULL;
     const DecodeReg* curr = DecodeReg::Head();
+    char test_stream[2];
+    stream->rewind();
     while (curr) {
+        if (stream->read(test_stream, 2) != 2) {
+            SkDebugf("stream err %s %d", __FILE__,__LINE__);
+            break;
+        }
+        stream->rewind();
         codec = curr->factory()(stream);
         // we rewind here, because we promise later when we call "decode", that
         // the stream will be at its beginning.

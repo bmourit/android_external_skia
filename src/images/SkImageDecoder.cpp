@@ -13,7 +13,17 @@
 #include "SkStream.h"
 #include "SkTemplates.h"
 #include "SkCanvas.h"
+#include "Img_En.h"
+#include <cutils/properties.h>
+#ifdef FS_WRITE
+#undef FS_WRITE 
+#endif
 
+#ifdef TIME_SAT
+#include <sys/time.h>
+#endif
+
+static int img_enhance;
 SK_DEFINE_INST_COUNT(SkImageDecoder::Peeker)
 SK_DEFINE_INST_COUNT(SkImageDecoder::Chooser)
 SK_DEFINE_INST_COUNT(SkImageDecoderFactory)
@@ -37,6 +47,7 @@ SkImageDecoder::SkImageDecoder()
     , fChooser(NULL)
     , fAllocator(NULL)
     , fSampleSize(1)
+    , fDoEnhance(0)
     , fDefaultPref(SkBitmap::kNo_Config)
     , fDitherImage(true)
     , fUsePrefTable(false)
@@ -59,6 +70,7 @@ void SkImageDecoder::copyFieldsToOther(SkImageDecoder* other) {
     other->setChooser(fChooser);
     other->setAllocator(fAllocator);
     other->setSampleSize(fSampleSize);
+    other->setDoEnhance(fDoEnhance);
     if (fUsePrefTable) {
         other->setPrefConfigTable(fPrefTable);
     } else {
@@ -122,6 +134,11 @@ void SkImageDecoder::setSampleSize(int size) {
         size = 1;
     }
     fSampleSize = size;
+}
+
+void SkImageDecoder::setDoEnhance(int doEnhance) {
+    
+    fDoEnhance = doEnhance;
 }
 
 bool SkImageDecoder::chooseFromOneChoice(SkBitmap::Config config, int width,
@@ -189,19 +206,119 @@ SkBitmap::Config SkImageDecoder::getPrefConfig(SrcDepth srcDepth,
     return config;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+void SkImageDecoder::image_scale(scale_param_t *dst, scale_param_t *src) {
+    unsigned int hs,hd;
+    unsigned int ws,wd;
+    unsigned int src_stride;
+    unsigned int i,j;
+    unsigned int h_sample;
+    unsigned int v_sample;
+    unsigned int t1,t2,tx,ty;
+
+    u_scale *pSrc;
+    u_scale *pDest;
+    ws = src->width;
+    hs = src->height;
+    wd = dst->width;
+    hd = dst->height;
+
+    src_stride = src->stride;
+    pDest = (u_scale *)dst->addr;
+    h_sample = (1<<SHIFTVAL)*hs/hd;
+    v_sample = (1<<SHIFTVAL)*ws/wd;
+    t1 = 0;
+
+    for (i = 0; i < hd; i++) {
+    	ty = t1 >> SHIFTVAL;
+    	t1 += h_sample;
+    	pSrc = (u_scale *)(src->addr + ty*src_stride);
+    	t2 = 0;
+
+    	for (j = 0; j < wd; j++) {
+    	    tx = t2 >> SHIFTVAL;
+    	    t2 += v_sample;
+    	    *pDest++ = *(pSrc + tx);
+        }
+    }
+    return;
+}
+
+int SkImageDecoder::image_enhance_func(int w, int h, SkBitmap::Config config, unsigned char *src) {
+    int rt = 0;
+    void *en_handle;
+    En_Parm_t en_private;
+    En_Input_t en_input;
+
+    if (w*h < 4096)//64*64 {
+       SkDebugf("don't do enhance for small image...");
+       return 0;
+    }
+
+    if (config == SkBitmap::kARGB_8888_Config)
+       en_input.data_format = EN_FORMAT_ABGR8888;
+    else
+       en_input.data_format = EN_FORMAT_RGB565;
+
+    en_input.media_format = EN_MEDIA_IMAGE;
+    en_input.width = w;
+    en_input.height = h;
+    en_handle = ImgEn_Open(&en_input);
+
+    if (en_handle == NULL) {
+        return -1;
+    }
+    en_private.src = src;
+    en_private.dst = src; 
+    rt = ImgEn_Run(en_handle,&en_private);
+    ImgEn_Close(en_handle);
+    return rt;
+}
+
 bool SkImageDecoder::decode(SkStream* stream, SkBitmap* bm,
                             SkBitmap::Config pref, Mode mode) {
     // we reset this to false before calling onDecode
     fShouldCancelDecode = false;
     // assign this, for use by getPrefConfig(), in case fUsePrefTable is false
     fDefaultPref = pref;
-
+    img_enhance = this->getDoEnhance();
+    SkBitmap::Config config;
+    struct timeval start, middle,end;
     // pass a temporary bitmap, so that if we return false, we are assured of
     // leaving the caller's bitmap untouched.
     SkBitmap    tmp;
+    int width,height;
+    unsigned char *enhance_src = NULL;
+    int sdram_cap;
+    char value[PROPERTY_VALUE_MAX];
+    property_get("system.ram.total", value, "1024");
+	sdram_cap=atoi(value);
+#ifdef TIME_SAT    
+    gettimeofday(&start,NULL);
+#endif
     if (!this->onDecode(stream, &tmp, mode)) {
         return false;
     }
+#ifdef TIME_SAT    
+    gettimeofday(&middle,NULL);
+#endif
+    config = tmp.getConfig();
+    if (img_enhance == 1 && sdram_cap >= SDRAM_SUPPORT && mode == SkImageDecoder::kDecodePixels_Mode \
+        && (config == SkBitmap::kRGB_565_Config || config == SkBitmap::kARGB_8888_Config)) {
+       SkAutoLockPixels alp(tmp);       
+       enhance_src = (unsigned char *)tmp.getPixels();
+       width = tmp.width();
+       height = tmp.height();
+
+       if (image_enhance_func(width, height, config, enhance_src)) {
+            SkDebugf("image_enhance failed at %d...",__LINE__);
+       }
+    }
+#ifdef TIME_SAT
+    gettimeofday(&end,NULL);
+    SkDebugf("total:%d ms deocde:%d ms enhance:%d ms",1000*(end.tv_sec-start.tv_sec)+(end.tv_usec-start.tv_usec)/1000, 1000*(middle.tv_sec-start.tv_sec)+(middle.tv_usec-start.tv_usec)/1000, \
+            1000*(end.tv_sec-middle.tv_sec)+(end.tv_usec-middle.tv_usec)/1000);
+#endif
     bm->swap(tmp);
     return true;
 }
@@ -219,6 +336,7 @@ bool SkImageDecoder::decodeSubset(SkBitmap* bm, const SkIRect& rect,
 bool SkImageDecoder::buildTileIndex(SkStream* stream,
                                 int *width, int *height) {
     // we reset this to false before calling onBuildTileIndex
+    this->setDoEnhance(img_enhance);
     fShouldCancelDecode = false;
 
     return this->onBuildTileIndex(stream, width, height);

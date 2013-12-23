@@ -16,6 +16,7 @@
 #include "SkTDArray.h"
 #include "SkTRegistry.h"
 
+#include <cutils/properties.h>
 class SkBMPImageDecoder : public SkImageDecoder {
 public:
     SkBMPImageDecoder() {}
@@ -111,7 +112,15 @@ bool SkBMPImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
     // Now decode the BMP into callback's rgb() array [r,g,b, r,g,b, ...]
     {
         image_codec::BmpDecoderHelper helper;
-        const int max_pixels = 16383*16383; // max width*height
+        int max_pixels;
+        int sdram_cap;
+        char value[PROPERTY_VALUE_MAX]; 
+        property_get("system.ram.total", value, "1024");
+	    sdram_cap=atoi(value);
+        if(sdram_cap == 512)
+            max_pixels = 2048*2048; // max width*height
+        else
+            max_pixels = 16383*16383; // max width*height
         if (!helper.DecodeImage((const char*)storage.get(), length,
                                 max_pixels, &callback)) {
             return false;

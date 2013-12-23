@@ -14,6 +14,7 @@
 #include "SkTemplates.h"
 #include "SkTLS.h"
 #include "SkTypeface.h"
+#include <cutils/properties.h>
 
 //#define SPEW_PURGE_STATUS
 //#define USE_CACHE_HASH
@@ -763,6 +764,16 @@ size_t SkGraphics::GetFontCacheLimit() {
 
 size_t SkGraphics::SetFontCacheLimit(size_t bytes) {
     return getSharedGlobals().setFontCacheLimit(bytes);
+    if (bytes == 0) {
+        int len;
+        char buf[PROPERTY_VALUE_MAX];
+        char* end;
+
+        len = property_get("ro.skia.min.font.cache", buf, "");
+        if (len > 0) {
+            bytes = strtol(buf, &end, 0);
+        }
+    }
 }
 
 size_t SkGraphics::GetFontCacheUsed() {

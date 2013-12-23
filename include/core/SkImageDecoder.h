@@ -17,6 +17,16 @@
 #include "SkRefCnt.h"
 #include "SkTypes.h"
 
+#define SHIFTVAL 5
+typedef struct scale_param{
+    unsigned char *addr;
+    unsigned int stride;
+    unsigned int width;
+    unsigned int height;
+}scale_param_t;
+
+typedef unsigned short u_scale;
+
 class SkStream;
 
 /** \class SkImageDecoder
@@ -242,6 +252,10 @@ public:
     int getSampleSize() const { return fSampleSize; }
     void setSampleSize(int size);
 
+    int getDoEnhance() const { return fDoEnhance; }
+    void setDoEnhance(int doEnhance);
+    int image_enhance_func(int w, int h, SkBitmap::Config config, unsigned char *src);
+    void image_scale(scale_param_t *dst, scale_param_t *src);
     /** Reset the sampleSize to its default of 1
      */
     void resetSampleSize() { this->setSampleSize(1); }
@@ -519,6 +533,7 @@ private:
     Chooser*                fChooser;
     SkBitmap::Allocator*    fAllocator;
     int                     fSampleSize;
+    int                     fDoEnhance;
     SkBitmap::Config        fDefaultPref;   // use if fUsePrefTable is false
     PrefConfigTable         fPrefTable;     // use if fUsePrefTable is true
     bool                    fDitherImage;
