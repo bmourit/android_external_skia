@@ -264,7 +264,111 @@ private:
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+#define MAX_WIDTH  30000
+#define MAX_HEIGHT 30000
+#define MIN_SIZE  1048576 /*1M pixels (1024*1024)*/
+#define MAX_COMPONENT 3 /*hw does not support CMYK or YCCK*/
+#define MAX_STREAMSIZE 31457280 /*limitation for input buffer (30*1024*1024)*/
+#define MAX_DECODESIZE 16777216 /*(4096*4096)*/
+#define MAX_BLOCK 2047
 
+/* Callbacks implementation */
+OMX_ERRORTYPE jpegDecEventHandler(
+  OMX_IN OMX_HANDLETYPE hComponent,
+  OMX_IN OMX_PTR pAppData, 
+  OMX_IN OMX_EVENTTYPE eEvent,
+  OMX_IN OMX_U32 nData1, 
+  OMX_IN OMX_U32 nData2,
+  OMX_IN OMX_PTR pEventData) {
+    appPrivateType* appPriv;
+    appPriv = (appPrivateType*)pAppData;
+
+    if(eEvent==OMX_EventCmdComplete) {
+        DEBUG(DEB_LEV_SIMPLE_SEQ,"Event handler has been called \n");
+        /*Increment the semaphore indicating command completed*/
+        tsem_up(&appPriv->stateSem);
+    }
+    return OMX_ErrorNone;
+}
+
+OMX_ERRORTYPE jpegDecEmptyBufferDone(
+  OMX_OUT OMX_HANDLETYPE hComponent,
+  OMX_OUT OMX_PTR pAppData,
+  OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer) {
+    return OMX_ErrorNone;
+}
+
+OMX_ERRORTYPE jpegDecFillBufferDone(
+  OMX_OUT OMX_HANDLETYPE hComponent,
+  OMX_OUT OMX_PTR pAppData,
+  OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer) {
+    appPrivateType* appPriv;
+    appPriv = (appPrivateType*)pAppData;
+    /*Signal the condition indicating Fill Buffer Done has been called*/
+    tsem_up(&appPriv->eosSem); 
+    return OMX_ErrorNone;
+}
+
+/* select an appropriate decoder for this file for Actions' HW/SW */
+static bool select_sw_decoder(jpeg_decompress_struct* cinfo, size_t length, int sampleSize) {
+    int i;
+    int H[3]={0};
+    int V[3]={0};
+    int Mbheight;
+    int Picturew0_14;
+    int Picturew0_13;
+    int Pictureh0_14;
+    int scale = 0;
+    int w_pad = 0;
+    int h_pad = 0;
+
+    for (i=0;i<cinfo->num_components;i++) {
+        H[i] = cinfo->comp_info[i].h_samp_factor;
+        V[i] = cinfo->comp_info[i].v_samp_factor;
+    }
+
+    if ((cinfo->image_width*cinfo->image_height < MIN_SIZE) || cinfo->progressive_mode == true \
+    		|| (H[0] == 2 && H[1] == 0) || cinfo->num_components > MAX_COMPONENT) {
+    	return true;
+    }
+
+    if (length > MAX_STREAMSIZE || cinfo->image_width > MAX_WIDTH \
+    		|| cinfo->image_height > MAX_HEIGHT ) {
+        return true;
+    }
+    if (V[0]==2) {
+        Mbheight = 4; 
+    } else {
+        Mbheight = 3;
+    }
+
+    Picturew0_14 = cinfo->image_width;
+    Pictureh0_14 = cinfo->image_height;
+    if (sampleSize<2)
+        scale = 0;
+    else if (sampleSize>=2 && sampleSize<4)
+        scale = 1;
+    else if (sampleSize>=4 && sampleSize<8)
+        scale = 2;
+    else
+        scale = 3;
+    if (Picturew0_14%(1<<(scale+4)))
+        w_pad = 1;
+    if (Pictureh0_14%(1<<(scale+4)))
+        h_pad = 1;
+
+    Picturew0_14 = ((Picturew0_14>>(scale+4))+ w_pad)<<(scale+4);
+    Picturew0_13 = Picturew0_14&0x3FFF;
+    Pictureh0_14 = ((Pictureh0_14>>(scale+4))+ h_pad)<<(scale+4);
+
+    if ((Picturew0_14*Pictureh0_14) > ((MAX_BLOCK*Picturew0_13)<< Mbheight)) {
+#ifdef SK_DEBUG
+        SkDebugf("run sw decoder for block limitation...");
+#endif
+       return true;
+    }
+    return false;
+}
 /*  If we need to better match the request, we might examine the image and
      output dimensions, and determine if the downsampling jpeg provided is
      not sufficient. If so, we can recompute a modified sampleSize value to
@@ -475,10 +579,14 @@ bool SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
 #endif
 
     JPEGAutoClean autoClean;
-
+    unsigned char *dst_bm;
+    int dst_w,dst_h;
+    bool sw_decoder = false;
+    JSAMPLE* rowptr;
     jpeg_decompress_struct  cinfo;
     skjpeg_source_mgr       srcManager(stream, this);
-
+    size_t length = stream->getLength();
+    char value[PROPERTY_VALUE_MAX];
     skjpeg_error_mgr errorManager;
     set_error_mgr(&cinfo, &errorManager);
 
@@ -495,12 +603,202 @@ bool SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
     if (status != JPEG_HEADER_OK) {
         return return_false(cinfo, *bm, "read_header");
     }
+// Actions
+    property_get("system.ram.total", value, "1024");
+    int sdram_cap = atoi(value);
+    if (sdram_cap == 512 && cinfo.progressive_mode == true && cinfo.image_width*cinfo.image_height > (MAX_DECODESIZE>>2)) {
+        return return_false(cinfo, *bm, "not support large progressive");
+    }
+
+    int doEnhance = this->getDoEnhance();
+    int sampleSize = this->getSampleSize();
+    sw_decoder = select_sw_decoder(&cinfo,length,sampleSize);
+    if (sw_decoder == true) {
+#ifdef SK_DEBUG
+        SkDebugf("sw decode this...");
+#endif
+        goto SW_DECODER;
+    }
+
+//else hw decode
+HW_DECODER: {
+    stream->rewind();
+    config = this->getPrefConfig(k32Bit_SrcDepth, false);
+    if (config != SkBitmap::kARGB_8888_Config && config != SkBitmap::kRGB_565_Config) {
+        config = SkBitmap::kARGB_8888_Config;
+    }
+
+    SkScaledBitmapSampler sampler(cinfo.image_width, cinfo.image_height, sampleSize);
+
+    if (SkImageDecoder::kDecodeBounds_Mode == mode) {
+    	bm->setConfig(config, sampler.scaledWidth(), sampler.scaledHeight());
+    	bm->setIsOpaque(config != SkBitmap::kA8_Config);
+    	return true;
+    }
+
+    bm->lockPixels();
+    rowptr = (JSAMPLE*) bm->getPixels();
+    reuseBitmap = (rowptr != NULL);
+    bm->unlockPixels();
+    bm->setConfig(config, sampler.scaledWidth(), sampler.scaledHeight(), 0);
+    bm->setIsOpaque(config != SkBitmap::kA8_Config);
+    dst_w = bm->width();
+    dst_h = bm->height();
+
+    if ((dst_w*dst_h) > MAX_DECODESIZE) {
+#ifdef RESAMPLE
+        SkDebugf("attention, here change the sampleSize in jpeg decode");
+        while((cinfo.image_width/sampleSize)*(cinfo.image_height/sampleSize) > MAX_DECODESIZE) {
+            sampleSize++;
+        }
+        SkScaledBitmapSampler sampler_once(cinfo.image_width, cinfo.image_height, sampleSize);
+        bm->setConfig(config, sampler_once.scaledWidth(), sampler_once.scaledHeight(), 0);
+#endif
+    }
+
+    if (!this->allocPixelRef(bm, NULL)) {
+        SkDebugf("attention, can't allocate dest buffer");
+        return false;
+    }
+    SkAutoLockPixels alp(*bm);
+    dst_bm = (unsigned char *)bm->getPixels();
+    dst_w = bm->width();
+    dst_h = bm->height();
+
+    appPrivateType* appPriv;
+    unsigned char *src_buf;
+    int buffersize;
+    OMX_PTR pAppData;
+    OMX_STRING compName = "OMX.Action.Image.Decoder";
+    OMX_ERRORTYPE err;
+
+    OMX_CALLBACKTYPE callbacks = {
+        &jpegDecEventHandler,
+  	&jpegDecEmptyBufferDone,
+  	&jpegDecFillBufferDone,
+    };
+
+    omx_jpegdec_component_PrivateType* pComponentPrivate = NULL;
+    /*Initialize application private data*/
+    appPriv = (appPrivateType*)malloc(sizeof(appPrivateType));
+
+    if (appPriv == NULL) {
+        return false;
+    }
+    tsem_init(&appPriv->stateSem, 0);
+    tsem_init(&appPriv->eosSem, 0);
+    err = OMX_Init();
+
+    if (err != OMX_ErrorNone) {
+        SkDebugf("attention, an error happened when OMX_Init ");
+  	free(appPriv);
+  	return false;
+    }
+    pAppData = (OMX_PTR)appPriv;
+    err = OMX_GetHandle(&appPriv->handle, compName, pAppData, &callbacks);
+
+    if (appPriv->handle==NULL) {
+        SkDebugf("attention, an error happened when OMX_GetHandle ");
+        free(appPriv);
+	OMX_Deinit();
+	return false;
+    }
+
+    pComponentPrivate = (omx_jpegdec_component_PrivateType*)((OMX_COMPONENTTYPE*)appPriv->handle)->pComponentPrivate;
+    err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateIdle, NULL);
+    appPriv->pInBuffer[0] = appPriv->pOutBuffer[0] = NULL;
+    pComponentPrivate->scalefactor = sampleSize;
+    pComponentPrivate->image_width = cinfo.image_width;
+    pComponentPrivate->image_height = cinfo.image_height;
+    pComponentPrivate->imgOutputBufLen = (dst_w*dst_h)<<(config == SkBitmap::kARGB_8888_Config ? 2:1); /*32bits or 16bits*/
+
+    if (config == SkBitmap::kARGB_8888_Config)
+	pComponentPrivate->out_config = MMM_FMT_ARGB;
+    else
+	pComponentPrivate->out_config = MMM_FMT_RGB;
+    if (sdram_cap >= SDRAM_SUPPORT && doEnhance == 1)
+	pComponentPrivate->doEnhance = 1;
+    else
+	pComponentPrivate->doEnhance = 0;
+    buffersize = length;
+    src_buf = (unsigned char *)actal_malloc_uncache(buffersize,&(pComponentPrivate->source_phy));
+
+    if(src_buf == NULL) {
+	SkDebugf("attention, can't allocate input buffer");
+	free(appPriv);
+  	OMX_FreeHandle(appPriv->handle);
+  	OMX_Deinit();
+	return false;
+    }
+
+    if (stream->read(src_buf,buffersize)!=buffersize) {
+  	SkDebugf("attention, an error happened when read jpeg file");
+  	free(appPriv);
+  	actal_free_uncache(src_buf);
+	OMX_FreeHandle(appPriv->handle);
+	OMX_Deinit();
+	return false;
+    }
+    err = OMX_UseBuffer(appPriv->handle, &(appPriv->pInBuffer[0]), 0, NULL, length,src_buf);
+
+    if (err != OMX_ErrorNone) {
+  	free(appPriv);
+  	actal_free_uncache(src_buf);
+  	OMX_FreeHandle(appPriv->handle);
+  	OMX_Deinit();
+  	return false;
+    }
+    err = OMX_UseBuffer(appPriv->handle, &(appPriv->pOutBuffer[0]), 1, NULL, pComponentPrivate->imgOutputBufLen,dst_bm);
+    if (err != OMX_ErrorNone) {
+	free(appPriv);
+  	actal_free_uncache(src_buf);
+  	OMX_FreeHandle(appPriv->handle);
+  	OMX_Deinit();
+  	return false;
+    }
+  /*Wait till state has been changed*/
+  	tsem_down(&appPriv->stateSem);
+  	err = OMX_FillThisBuffer(appPriv->handle, appPriv->pOutBuffer[0]);
+  	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateExecuting, NULL);
+  /*Wait till state has been changed*/
+  	tsem_down(&appPriv->stateSem);
+  	appPriv->pInBuffer[0]->nFilledLen = length;
+  	err = OMX_EmptyThisBuffer(appPriv->handle, appPriv->pInBuffer[0]);
+  	tsem_down(&appPriv->eosSem);
+  	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet,OMX_StateIdle, NULL);
+  	tsem_down(&appPriv->stateSem);
+  	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateLoaded, NULL);
+  /*Allocate Input and output buffers*/
+	actal_free_uncache(src_buf);
+	err = OMX_FreeBuffer(appPriv->handle, 0, appPriv->pInBuffer[0]);
+	err = OMX_FreeBuffer(appPriv->handle, 1, appPriv->pOutBuffer[0]);
+  /*Wait till state has been changed*/
+  	tsem_down(&appPriv->stateSem);
+  /*Free handle*/
+  	err = OMX_FreeHandle(appPriv->handle);
+  	int decode_error = pComponentPrivate->decode_error;
+  /*De-initialize omx core*/
+  	err = OMX_Deinit();
+  /*Destroy semaphores*/
+  	tsem_deinit(&appPriv->stateSem);
+  	tsem_deinit(&appPriv->eosSem);
+  	free(appPriv);
+  	if (reuseBitmap) {
+  	    bm->notifyPixelsChanged();
+  	}
+  	if (decode_error) {
+  	    SkDebugf("In-%s , %d, find vde decode error",__FILE__,__LINE__);
+  	    return false;
+  	}
+  	return true;
+}
+SW_DECODER:
 
     /*  Try to fulfill the requested sampleSize. Since jpeg can do it (when it
         can) much faster that we, just use their num/denom api to approximate
         the size.
     */
-    int sampleSize = this->getSampleSize();
+    //int sampleSize = this->getSampleSize();
 
     set_dct_method(*this, &cinfo);
 
@@ -514,10 +812,10 @@ bool SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
 #ifdef ANDROID_RGB
     adjust_out_color_space_and_dither(&cinfo, config, *this);
 #endif
-
-    if (1 == sampleSize && SkImageDecoder::kDecodeBounds_Mode == mode) {
+if (1 == sampleSize && SkImageDecoder::kDecodeBounds_Mode == mode) {
         bm->setConfig(config, cinfo.image_width, cinfo.image_height);
-        bm->setIsOpaque(config != SkBitmap::kA8_Config);
+        
+bm->setIsOpaque(config != SkBitmap::kA8_Config);
         return true;
     }
 
@@ -574,6 +872,7 @@ bool SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
         (config == SkBitmap::kRGB_565_Config &&
                 cinfo.out_color_space == JCS_RGB_565)))
     {
+
         JSAMPLE* rowptr = (JSAMPLE*)bm->getPixels();
         INT32 const bpr =  bm->rowBytes();
 
@@ -666,10 +965,22 @@ bool SkJPEGImageDecoder::onDecode(SkStream* stream, SkBitmap* bm, Mode mode) {
 #ifdef SK_BUILD_FOR_ANDROID
 bool SkJPEGImageDecoder::onBuildTileIndex(SkStream* stream, int *width, int *height) {
 
+    int decode_error = 0;
+    int dst_w;
+    int dst_h; 
+    int shift = 1;
+    unsigned char* whole_bm;
+    unsigned char* rowptr; 
+    int   bpr;
+    int   busadd;
+    char value[PROPERTY_VALUE_MAX]; 
     SkAutoTDelete<SkJPEGImageIndex> imageIndex(SkNEW_ARGS(SkJPEGImageIndex, (stream, this)));
     jpeg_decompress_struct* cinfo = imageIndex->cinfo();
 
     skjpeg_error_mgr sk_err;
+    size_t length = stream->getLength();
+    int sampleSize = 1;
+    bool sw_decoder = false;
     set_error_mgr(cinfo, &sk_err);
 
     // All objects need to be instantiated before this setjmp call so that
@@ -683,8 +994,304 @@ bool SkJPEGImageDecoder::onBuildTileIndex(SkStream* stream, int *width, int *hei
         return false;
     }
 
+// Actions
+    property_get("system.ram.total", value, "1024");
+	int sdram_cap = atoi(value);
+    if (sdram_cap == 512 && cinfo->progressive_mode == true && cinfo->image_width*cinfo->image_height > (MAX_DECODESIZE>>2)) {
+        return false;
+    }
+
+    imageIndex->build_huffman = false;
+    imageIndex->reserve_bitmap = NULL;
+    imageIndex->bitmap = NULL;
+    if (sdram_cap >= SDRAM_SUPPORT == false) {
+        SkBitmap *bitmap = new SkBitmap;
+        imageIndex->bitmap = bitmap;
+        while((cinfo->image_width/sampleSize)*(cinfo->image_height/sampleSize) > MAX_DECODESIZE) {
+            sampleSize<<=1;
+        }
+        imageIndex->sample_num = sampleSize;
+        int doEnhance = this->getDoEnhance();
+        /*save rgb16 bit for lack of memory*/
+        SkBitmap::Config config = SkBitmap::kRGB_565_Config;
+        if (config == SkBitmap::kARGB_8888_Config)
+            shift = 2;
+        imageIndex->config = config;
+        sw_decoder = select_sw_decoder(cinfo,length,sampleSize);
+        if (sw_decoder == 0) {
+            dst_w = cinfo->image_width / sampleSize;
+    	    dst_h = cinfo->image_height / sampleSize;
+    	    bitmap->setConfig(config, dst_w, dst_h);
+    	    whole_bm = (unsigned char*)actal_malloc_wt((dst_w*dst_h)<<shift, &busadd);
+    	    if (whole_bm == NULL) {
+    	        SkDebugf("attention, can't allocate enhance memory...");
+    	        return false;
+    	    }
+
+    	imageIndex->reserve_bitmap =  whole_bm;
+    	bitmap->setPixels(whole_bm, NULL);
+        stream->rewind();
+            appPrivateType* appPriv;
+            unsigned char *src_buf;
+            int buffersize;
+            OMX_PTR pAppData;
+        	OMX_STRING compName="OMX.Action.Image.Decoder";
+          	OMX_ERRORTYPE err;
+          	OMX_CALLBACKTYPE callbacks = { 	&jpegDecEventHandler,
+          					&jpegDecEmptyBufferDone,
+          					&jpegDecFillBufferDone,
+                               			};
+        	omx_jpegdec_component_PrivateType* pComponentPrivate = NULL;
+                /* Initialize application private data */
+          	appPriv = (appPrivateType*)malloc(sizeof(appPrivateType));
+        	if (appPriv == NULL) {
+        	    return false;
+        	}
+          	tsem_init(&appPriv->stateSem, 0);
+         	tsem_init(&appPriv->eosSem, 0);
+
+          	err = OMX_Init();
+          	if (err != OMX_ErrorNone) {
+          	    SkDebugf("attention, an error happened when OMX_Init ");
+          		free(appPriv);
+          		return false;
+          	}
+          	pAppData = (OMX_PTR)appPriv;
+                //GetHandle
+          	err = OMX_GetHandle(&appPriv->handle, compName, pAppData , &callbacks);
+        	if(appPriv->handle==NULL) {
+        	    SkDebugf("attention, an error happened when OMX_GetHandle ");
+        		free(appPriv);
+        		OMX_Deinit();
+        	    return false;
+        	}
+          	pComponentPrivate = (omx_jpegdec_component_PrivateType*)((OMX_COMPONENTTYPE*)appPriv->handle)->pComponentPrivate;
+          	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateIdle, NULL);
+          	appPriv->pInBuffer[0]=appPriv->pOutBuffer[0]=NULL;
+                pComponentPrivate->scalefactor = sampleSize;
+        	pComponentPrivate->image_width = cinfo->image_width;
+        	pComponentPrivate->image_height = cinfo->image_height;
+        	pComponentPrivate->imgOutputBufLen = \
+        	(dst_w*dst_h)<<(config == SkBitmap::kARGB_8888_Config ? 2:1); //32bits or 16bits
+        	if (config == SkBitmap::kARGB_8888_Config)
+        	    pComponentPrivate->out_config = MMM_FMT_ARGB;
+        	else
+        	    pComponentPrivate->out_config = MMM_FMT_RGB;
+        	pComponentPrivate->doEnhance = doEnhance;
+                buffersize = length;
+
+        	src_buf = (unsigned char *)actal_malloc_uncache(buffersize, &(pComponentPrivate->source_phy));
+        	if(src_buf == NULL) {
+        	    SkDebugf("attention, can't allocate input buffer");
+        		free(appPriv);
+        	  	OMX_FreeHandle(appPriv->handle);
+        	  	OMX_Deinit();
+        		return false;
+        	}
+          	if (stream->read(src_buf,buffersize)!=buffersize) {
+          	    SkDebugf("attention, an error happened when read jpeg file");
+          	    free(appPriv);
+          	    actal_free_uncache(src_buf);
+        	  	OMX_FreeHandle(appPriv->handle);
+        	  	OMX_Deinit();
+        		return false;
+          	}
+          	err = OMX_UseBuffer(appPriv->handle, &(appPriv->pInBuffer[0]), 0, NULL, length,src_buf);
+          	if (err != OMX_ErrorNone) {
+          		free(appPriv);
+          		actal_free_uncache(src_buf);
+        	  	OMX_FreeHandle(appPriv->handle);
+        	  	OMX_Deinit();
+          		return false;
+          	}
+          	err = OMX_UseBuffer(appPriv->handle, &(appPriv->pOutBuffer[0]), 1, NULL, pComponentPrivate->imgOutputBufLen,whole_bm);
+          	if (err != OMX_ErrorNone) {
+          		free(appPriv);
+          		actal_free_uncache(src_buf);
+        	  	OMX_FreeHandle(appPriv->handle);
+        	  	OMX_Deinit();
+          		return false;
+          	}
+          /*Wait till state has been changed*/
+          	tsem_down(&appPriv->stateSem);
+          	err = OMX_FillThisBuffer(appPriv->handle, appPriv->pOutBuffer[0]);
+          	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateExecuting, NULL);
+          /*Wait till state has been changed*/
+          	tsem_down(&appPriv->stateSem);
+          	appPriv->pInBuffer[0]->nFilledLen = length;
+          	err = OMX_EmptyThisBuffer(appPriv->handle, appPriv->pInBuffer[0]);
+          	tsem_down(&appPriv->eosSem);
+          	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet,OMX_StateIdle, NULL);
+          	tsem_down(&appPriv->stateSem);
+          	err = OMX_SendCommand(appPriv->handle, OMX_CommandStateSet, OMX_StateLoaded, NULL);
+          /*Allocate Input and output buffers*/
+        	actal_free_uncache(src_buf);
+        	err = OMX_FreeBuffer(appPriv->handle, 0, appPriv->pInBuffer[0]);
+        	err = OMX_FreeBuffer(appPriv->handle, 1, appPriv->pOutBuffer[0]);
+          /*Wait till state has been changed*/
+          	tsem_down(&appPriv->stateSem);
+          /*Free handle*/
+          	err = OMX_FreeHandle(appPriv->handle);
+          	decode_error = pComponentPrivate->decode_error;
+          /*De-initialize omx core*/
+          	err = OMX_Deinit();
+          /*Destroy semaphores*/
+          	tsem_deinit(&appPriv->stateSem);
+          	tsem_deinit(&appPriv->eosSem);
+          	free(appPriv);
+          	if(decode_error)
+          	    return false;
+        } else {
+            cinfo->dct_method = JDCT_IFAST;
+            cinfo->scale_num = 1;
+            cinfo->scale_denom = sampleSize;
+        /* this gives about 30% performance improvement. In theory it may
+           reduce the visual quality, in practice I'm not seeing a difference
+         */
+        cinfo->do_fancy_upsampling = 0;
+        /* this gives another few percents */
+        cinfo->do_block_smoothing = 0;
+        /* default format is RGB */
+        cinfo->out_color_space = JCS_RGB;
+    #ifdef ANDROID_RGB
+        cinfo->dither_mode = JDITHER_ORDERED;
+        if (config == SkBitmap::kARGB_8888_Config) {
+            cinfo->out_color_space = JCS_RGBA_8888;
+        } else if (config == SkBitmap::kRGB_565_Config) {
+            cinfo->out_color_space = JCS_RGB_565;
+        }
+    #endif
+        /*  image_width and image_height are the original dimensions, available
+            after jpeg_read_header(). To see the scaled dimensions, we have to call
+            jpeg_start_decompress(), and then read output_width and output_height.
+        */    
+        if (!jpeg_start_decompress(cinfo)) {
+            /*  If we failed here, we may still have enough information to return
+                to the caller if they just wanted (subsampled bounds). If sampleSize
+                was 1, then we would have already returned. Thus we just check if
+                we're in kDecodeBounds_Mode, and that we have valid output sizes.
+
+                One reason to fail here is that we have insufficient stream data
+                to complete the setup. However, output dimensions seem to get
+                computed very early, which is why this special check can pay off. */
+           return return_false(*cinfo, *bitmap, "start_decompress");
+        }
+
+        sampleSize = recompute_sampleSize(sampleSize, *cinfo);
+        // should we allow the Chooser (if present) to pick a config for us???
+        if (!this->chooseFromOneChoice(config, cinfo->output_width, cinfo->output_height)) {
+            return return_false(*cinfo, *bitmap, "chooseFromOneChoice");
+        }
+
+    #ifdef ANDROID_RGB
+        /* short-circuit the SkScaledBitmapSampler when possible, as this gives
+           a significant performance boost. */
+        if (sampleSize == 1) {
+    	    bitmap->setConfig(config, cinfo->output_width, cinfo->output_height);
+    	    whole_bm = (unsigned char*)actal_malloc_wt((cinfo->output_width*cinfo->output_height)<<shift, &busadd);
+    	    if (whole_bm == NULL) {
+    	        SkDebugf("attention, can't allocate enhance memory...");
+    	        return false;
+    	    }
+    	    imageIndex->reserve_bitmap =  whole_bm;
+    	    bitmap->setPixels(whole_bm, NULL);
+            rowptr = whole_bm;
+            bpr =  bitmap->rowBytes();
+            while (cinfo->output_scanline < cinfo->output_height) {
+                int row_count = jpeg_read_scanlines(cinfo, &rowptr, 1);
+                // if row_count == 0, then we didn't get a scanline, so abort.
+                // if we supported partial images, we might return true in this case
+                if (0 == row_count) {
+                    return return_false(*cinfo, *bitmap, "read_scanlines");
+                }
+                if (this->shouldCancelDecode()) {
+                    return return_false(*cinfo, *bitmap, "shouldCancelDecode");
+                }
+                rowptr += bpr;
+            }
+        }
+    #endif
+        else {
+            // check for supported formats
+            SkScaledBitmapSampler::SrcConfig sc;
+            if (3 == cinfo->out_color_components && JCS_RGB == cinfo->out_color_space) {
+                sc = SkScaledBitmapSampler::kRGB;
+#ifdef ANDROID_RGB
+            } else if (JCS_RGBA_8888 == cinfo->out_color_space) {
+                sc = SkScaledBitmapSampler::kRGBX;
+            } else if (JCS_RGB_565 == cinfo->out_color_space) {
+                sc = SkScaledBitmapSampler::kRGB_565;
+#endif
+            } else if (1 == cinfo->out_color_components && JCS_GRAYSCALE == cinfo->out_color_space) {
+                sc = SkScaledBitmapSampler::kGray;
+            } else {
+                return return_false(*cinfo, *bitmap, "jpeg colorspace");
+            }
+            
+            SkScaledBitmapSampler sampler(cinfo->output_width, cinfo->output_height, sampleSize);
+            dst_w = sampler.scaledWidth();
+    	    dst_h = sampler.scaledHeight();     
+    	    bitmap->setConfig(config, dst_w, dst_h);
+    	    whole_bm = (unsigned char*)actal_malloc_wt((dst_w*dst_h)<<shift, &busadd);
+    	    if (whole_bm == NULL) {
+    	        SkDebugf("attention, can't allocate enhance memory...");
+    	        return false;
+    	    }
+    	    index->reserve_bitmap =  whole_bm;
+    	    bitmap->setPixels(whole_bm, NULL);
+            if (!sampler.begin(bitmap, sc, true)) {
+                return return_false(*cinfo, *bitmap, "sampler.begin");
+            }
+
+            uint8_t* srcRow = (uint8_t*)srcStorage.reset(cinfo->output_width * 4);
+
+            //  Possibly skip initial rows [sampler.srcY0]
+            if (!skip_src_rows(cinfo, srcRow, sampler.srcY0())) {
+                return return_false(*cinfo, *bitmap, "skip rows");
+            }
+
+            // now loop through scanlines until y == bm->height() - 1
+            for (int y = 0;; y++) {
+                JSAMPLE* lineptr = (JSAMPLE*)srcRow;
+                int row_count = jpeg_read_scanlines(cinfo, &lineptr, 1);
+                if (0 == row_count) {
+                    return return_false(*cinfo, *bitmap, "read_scanlines");
+                }
+                if (this->shouldCancelDecode()) {
+                    return return_false(*cinfo, *bitmap, "shouldCancelDecode");
+                }
+                sampler.next(srcRow);
+                if (bitmap->height() - 1 == y) {
+                    // we're done
+                    break;
+                }
+                if (!skip_src_rows(cinfo, srcRow, sampler.srcDY() - 1)) {
+                    return return_false(*cinfo, *bitmap, "skip rows");
+                }
+            }
+            // we formally skip the rest, so we don't get a complaint from libjpeg
+            if (!skip_src_rows(cinfo, srcRow, cinfo->output_height - cinfo->output_scanline)) {
+                return return_false(*cinfo, *bitmap, "skip rows");
+            }
+        }
+           jpeg_finish_decompress(cinfo);
+     }
+        if (doEnhance) {
+            if (image_enhance_func(bitmap->width(), bitmap->height(), config, whole_bm)) {
+                //image_enhance failed, but not return false
+                SkDebugf("image_enhance failed at %d...",__LINE__);
+            }
+        }
+    }
+    imageIndex->index = (huffman_index*)malloc(sizeof(huffman_index));
+
+    if (sdram_cap < SDRAM_SUPPORT == true) {
+        imageIndex->buildHuffmanIndex;
+
     if (!imageIndex->buildHuffmanIndex()) {
         return false;
+    }
+        imageIndex->build_huffman = true;
     }
 
     // destroy the cinfo used to create/build the huffman index
@@ -751,6 +1358,9 @@ bool SkJPEGImageDecoder::onDecodeSubset(SkBitmap* bm, const SkIRect& region) {
     set_dct_method(*this, cinfo);
 
     const SkBitmap::Config config = this->getBitmapConfig(cinfo);
+    if (imageIndex->build_huffman == false) {
+        config = imageIndex->config;
+    }
 #ifdef ANDROID_RGB
     adjust_out_color_space_and_dither(cinfo, config, *this);
 #endif
@@ -768,7 +1378,11 @@ bool SkJPEGImageDecoder::onDecodeSubset(SkBitmap* bm, const SkIRect& region) {
     SkScaledBitmapSampler sampler(width, height, skiaSampleSize);
 
     SkBitmap bitmap;
+    if (index->build_huffman == false) {
+        bitmap->setConfig(config, width/skiaSampleSize, height/skiaSampleSize);
+    } else {
     bitmap.setConfig(config, sampler.scaledWidth(), sampler.scaledHeight());
+    }
     bitmap.setIsOpaque(true);
 
     // Check ahead of time if the swap(dest, src) is possible or not.
@@ -797,15 +1411,47 @@ bool SkJPEGImageDecoder::onDecodeSubset(SkBitmap* bm, const SkIRect& region) {
     /* short-circuit the SkScaledBitmapSampler when possible, as this gives
        a significant performance boost.
     */
-    if (skiaSampleSize == 1 &&
+    if ((skiaSampleSize == 1 &&
         ((config == SkBitmap::kARGB_8888_Config &&
                 cinfo->out_color_space == JCS_RGBA_8888) ||
         (config == SkBitmap::kRGB_565_Config &&
-                cinfo->out_color_space == JCS_RGB_565)))
+                cinfo->out_color_space == JCS_RGB_565))) ||
+                (imageIndex->build_huffman == false))
     {
         JSAMPLE* rowptr = (JSAMPLE*)bitmap.getPixels();
         INT32 const bpr = bitmap.rowBytes();
         int rowTotalCount = 0;
+        if (imageIndex->build_huffman == false) {
+            int offset_x;
+            int offset_y;
+            int offset_w;
+            int offset_h;
+            int bm_w = bitmap->width();
+            int bm_h = bitmap->height();
+            int sample_num = imageIndex->sample_num;
+            int shift = (config == SkBitmap::kARGB_8888_Config ? 2 :1);
+            int const src_stride = index->bitmap->rowBytes();
+            int total_height = imageIndex->bitmap->height();
+            JSAMPLE* src = (JSAMPLE*)imageIndex->bitmap->getPixels();
+
+            offset_x = startX/sample_num;
+            offset_y = startY/sample_num;
+            offset_w = (bm_w*actualSampleSize)/sample_num;
+            offset_h = (bm_h*actualSampleSize+(sample_num-1))/sample_num;
+            if ((offset_y+offset_h)>total_height)
+                 offset_h = total_height - offset_y;
+            scale_param_t scale_dest;
+            scale_param_t scale_src;
+
+            scale_src.addr = src + offset_y*src_stride+(offset_x<<shift);
+            scale_src.stride = src_stride;
+            scale_src.width = offset_w;
+            scale_src.height = offset_h;
+            scale_dest.addr =  rowptr;
+            scale_dest.width = bm_w;
+            scale_dest.height = bm_h;
+            image_scale(&scale_dest,&scale_src); 
+        } else {
 
         while (rowTotalCount < height) {
             int rowCount = jpeg_read_tile_scanline(cinfo,
@@ -822,6 +1468,7 @@ bool SkJPEGImageDecoder::onDecodeSubset(SkBitmap* bm, const SkIRect& region) {
             rowTotalCount += rowCount;
             rowptr += bpr;
         }
+    }
 
         if (swapOnly) {
             bm->swap(bitmap);

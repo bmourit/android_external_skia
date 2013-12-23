@@ -17,6 +17,8 @@
 #include "SkRefCnt.h"
 #include "SkTypes.h"
 
+#define SDRAM_SUPPORT 1024
+
 #define SHIFTVAL 5
 typedef struct scale_param{
     unsigned char *addr;

@@ -250,7 +250,7 @@ int SkImageDecoder::image_enhance_func(int w, int h, SkBitmap::Config config, un
     En_Parm_t en_private;
     En_Input_t en_input;
 
-    if (w*h < 4096)//64*64 {
+    if (w*h < 4096) { //64*64
        SkDebugf("don't do enhance for small image...");
        return 0;
     }
